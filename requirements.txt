@@ -1,0 +1,30 @@
+# MindTrace - Cognitive Pattern Analyzer
+# Requirements
+
+# Core
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# NLP
+nltk>=3.8
+textblob>=0.17
+spacy>=3.8
+
+# ML
+scikit-learn>=1.3
+scipy>=1.11
+
+# Visualization  
+plotly>=5.18
+wordcloud>=1.9
+
+# Jupyter
+ipywidgets>=8.1
+ipython>=8.0
+jupyter>=1.0
+
+# Optional - Transformers (for advanced analysis)
+# transformers>=4.35
+# torch>=2.0
