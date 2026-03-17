@@ -1,0 +1,20 @@
+# MindTrace Docker Compose
+
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+    volumes:
+      - ./data:/app/data
+
+  notebook:
+    image: jupyter/scipy-notebook
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/home/jovyan
