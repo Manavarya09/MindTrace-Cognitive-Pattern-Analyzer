@@ -1,0 +1,412 @@
+# Kubernetes Deployment Configuration for MindTrace
+# Production-grade K8s manifests
+
+# namespace.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindtrace
+  labels:
+    app: mindtrace
+    environment: production
+
+---
+
+# configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mindtrace-config
+  namespace: mindtrace
+data:
+  DATABASE_URL: "postgresql://mindtrace:password@postgres:5432/mindtrace"
+  REDIS_URL: "redis://redis:6379"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  LOG_LEVEL: "INFO"
+  MAX_WORKERS: "4"
+  MODEL_CACHE_DIR: "/app/models"
+
+---
+
+# secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mindtrace-secrets
+  namespace: mindtrace
+type: Opaque
+stringData:
+  DATABASE_PASSWORD: "changeme"
+  API_SECRET_KEY: "your-secret-key-here"
+  JWT_SECRET: "jwt-secret-here"
+  OPENAI_API_KEY: "sk-your-key-here"
+  AWS_ACCESS_KEY_ID: "your-key"
+  AWS_SECRET_ACCESS_KEY: "your-secret"
+
+---
+
+# pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mindtrace-data
+  namespace: mindtrace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+
+# deployment-api.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindtrace-api
+  namespace: mindtrace
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mindtrace-api
+  template:
+    metadata:
+      labels:
+        app: mindtrace-api
+    spec:
+      containers:
+        - name: api
+          image: mindtrace/api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: mindtrace-config
+            - secretRef:
+                name: mindtrace-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /app/models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: mindtrace-data
+
+---
+
+# deployment-worker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindtrace-worker
+  namespace: mindtrace
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: mindtrace-worker
+  template:
+    metadata:
+      labels:
+        app: mindtrace-worker
+    spec:
+      containers:
+        - name: worker
+          image: mindtrace/worker:latest
+          envFrom:
+            - configMapRef:
+                name: mindtrace-config
+            - secretRef:
+                name: mindtrace-secrets
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /app/models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: mindtrace-data
+
+---
+
+# service-api.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindtrace-api
+  namespace: mindtrace
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    app: mindtrace-api
+
+---
+
+# service-loadbalancer.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindtrace-lb
+  namespace: mindtrace
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    app: mindtrace-api
+
+---
+
+# hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mindtrace-api-hpa
+  namespace: mindtrace
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mindtrace-api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mindtrace-ingress
+  namespace: mindtrace
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - api.mindtrace.ai
+      secretName: mindtrace-tls
+  rules:
+    - host: api.mindtrace.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mindtrace-api
+                port:
+                  number: 80
+
+---
+
+# statefulset-kafka.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: mindtrace
+spec:
+  serviceName: kafka
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.5.0
+          ports:
+            - containerPort: 9092
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: "zookeeper:2181"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "3"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+
+---
+
+# statefulset-postgres.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: mindtrace
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mindtrace
+            - name: POSTGRES_USER
+              value: mindtrace
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mindtrace-secrets
+                  key: DATABASE_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+
+---
+
+# service-monitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mindtrace-monitor
+  namespace: mindtrace
+spec:
+  selector:
+    matchLabels:
+      app: mindtrace-api
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+
+---
+
+# poddisruptionbudget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mindtrace-api-pdb
+  namespace: mindtrace
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: mindtrace-api
+
+---
+
+# networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mindtrace-network-policy
+  namespace: mindtrace
+spec:
+  podSelector:
+    matchLabels:
+      app: mindtrace-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
