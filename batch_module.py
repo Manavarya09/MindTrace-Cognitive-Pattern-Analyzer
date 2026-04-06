@@ -19,7 +19,7 @@ class BatchProcessor:
         return results
     
     def parallel_process(self, texts, analyzer, n_jobs=4):
-        from sklearn.externals.joblib import Parallel, delayed
+        from joblib import Parallel, delayed
         
         results = Parallel(n_jobs=n_jobs)(
             delayed(analyzer.sentiment_vader)(t) for t in texts

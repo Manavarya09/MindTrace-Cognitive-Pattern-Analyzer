@@ -1,5 +1,7 @@
 # MindTrace - Data Validation Module
 
+import pandas as pd
+
 class DataValidator:
     def __init__(self):
         self.errors = []
